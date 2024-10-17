@@ -11,24 +11,34 @@ import (
 
 const boundary = "1854673209"
 
+var endPattern = []byte("{ready" + boundary + "}")
+
 // Server wraps an instance of ExifTool that can process multiple commands sequentially.
 // Servers avoid the overhead of loading ExifTool for each command.
 // Servers are safe for concurrent use by multiple goroutines.
 type Server struct {
-	exec   string
-	args   []string
-	srvMtx sync.Mutex
-	cmdMtx sync.Mutex
-	done   bool
-	cmd    *exec.Cmd
-	stdin  printer
-	stdout *bufio.Scanner
-	stderr *bufio.Scanner
+	exec      string
+	args      []string
+	srvMtx    sync.Mutex
+	cmdMtx    sync.Mutex
+	done      bool
+	cmd       *exec.Cmd
+	stdin     printer
+	stdout    *bufio.Scanner
+	stderr    *bufio.Scanner
+	splitFunc bufio.SplitFunc
 }
 
-// NewServer loads a new instance of ExifTool.
-func NewServer(commonArg ...string) (*Server, error) {
+func (server *Server) isCustomSplit() bool {
+	return server.splitFunc != nil
+}
+
+func newServerInternal(splitFunc bufio.SplitFunc, commonArg ...string) (*Server, error) {
 	e := &Server{exec: Exec}
+
+	if splitFunc != nil {
+		e.splitFunc = splitFunc
+	}
 
 	if Arg1 != "" {
 		e.args = append(e.args, Arg1)
@@ -44,6 +54,16 @@ func NewServer(commonArg ...string) (*Server, error) {
 		return nil, err
 	}
 	return e, nil
+}
+
+// NewServer loads a new instance of ExifTool.
+func NewServer(commonArg ...string) (*Server, error) {
+	return newServerInternal(nil, commonArg...)
+}
+
+// NewServerCh loads a new instance of ExifTool with output to channel file by file.
+func NewServerCh(splitFunc bufio.SplitFunc, commonArg ...string) (*Server, error) {
+	return newServerInternal(splitFunc, commonArg...)
 }
 
 func (e *Server) start() error {
@@ -67,8 +87,14 @@ func (e *Server) start() error {
 	e.stdin = printer{w: stdin}
 	e.stdout = bufio.NewScanner(stdout)
 	e.stderr = bufio.NewScanner(stderr)
-	e.stdout.Split(splitReadyToken)
-	e.stderr.Split(splitReadyToken)
+
+	if e.isCustomSplit() {
+		e.stdout.Split(e.splitFunc)
+	} else {
+		e.stdout.Split(splitReadyToken)
+	}
+
+	//e.stderr.Split(splitReadyToken) //don't need to change stderr splitter
 
 	err = cmd.Start()
 	if err != nil {
@@ -122,6 +148,10 @@ func (e *Server) Shutdown() error {
 // Command runs an ExifTool command with the given arguments and returns its stdout.
 // Commands should neither read from stdin, nor write binary data to stdout.
 func (e *Server) Command(arg ...string) ([]byte, error) {
+	if e.isCustomSplit() {
+		return nil, errors.New("err exiftool: Shouldn't use regular Command with custom splitFunc\n Use CommandCh instead")
+	}
+
 	e.cmdMtx.Lock()
 	defer e.cmdMtx.Unlock()
 
@@ -150,24 +180,56 @@ func (e *Server) Command(arg ...string) ([]byte, error) {
 	}
 
 	if len(e.stderr.Bytes()) > 0 {
-		return nil, errors.New("exiftool: " + string(bytes.TrimSpace(e.stderr.Bytes())))
+		if errmsg := string(bytes.TrimSpace(e.stderr.Bytes())); errmsg != string(endPattern) {
+			return nil, errors.New("exiftool: " + errmsg)
+		}
 	}
 	return append([]byte(nil), e.stdout.Bytes()...), nil
 }
 
-func splitReadyToken(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if i := bytes.Index(data, []byte("{ready"+boundary+"}")); i >= 0 {
-		if n := bytes.IndexByte(data[i:], '\n'); n >= 0 {
-			if atEOF && len(data) == (n+i+1) { // nothing left to scan
-				return n + i + 1, data[:i], bufio.ErrFinalToken
-			} else {
-				return n + i + 1, data[:i], nil
-			}
+// Command runs an ExifTool command with the given arguments and put its stdout to channel.
+// Commands should neither read from stdin, nor write binary data to stdout.
+func (e *Server) CommandCh(chout chan<- string, arg ...string) error {
+	if !e.isCustomSplit() {
+		return errors.New("err exiftool: for default splitter 'by command' better to use regular Command")
+	}
+
+	e.cmdMtx.Lock()
+	defer e.cmdMtx.Unlock()
+	defer close(chout)
+
+	e.stdin.print(arg...)
+	err := e.stdin.print("-execute" + boundary)
+	if err != nil {
+		e.restart()
+		return err
+	}
+
+	for e.stdout.Scan() {
+		chout <- e.stdout.Text()
+	}
+
+	if err := e.stdout.Err(); err != nil {
+		chout <- "err exiftool stdout: " + err.Error()
+		e.restart()
+		return err
+	}
+
+	for e.stderr.Scan() {
+		msg := e.stderr.Text()
+		if msg == string(endPattern) {
+			break
+		}
+		if msg != "" {
+			chout <- "err exiftool stderr: " + msg
 		}
 	}
 
-	if atEOF {
-		return 0, data, io.EOF
+	if err := e.stderr.Err(); err != nil {
+		chout <- "err exiftool stderr: " + err.Error()
+		e.restart()
+		return err
 	}
-	return 0, nil, nil
+
+	return nil
 }
