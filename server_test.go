@@ -52,7 +52,7 @@ func TestServer(t *testing.T) {
 }
 
 func TestServerCh(t *testing.T) {
-	e, err := NewServerCh(JsonSplitter)
+	e, err := NewServerCh(DefaultSplitter)
 	if err != nil {
 		t.Fatal(err)
 	}
