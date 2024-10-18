@@ -14,6 +14,8 @@ func TestServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	defer e.Close()
+
 	// ask for version number
 	out, err := e.Command("-ver")
 	if err != nil {
@@ -54,6 +56,8 @@ func TestServerCh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	defer e.Close()
 
 	// shouldn't work with the regular command
 	out, err := e.Command("-ver")
