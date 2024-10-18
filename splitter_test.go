@@ -69,9 +69,7 @@ func runSplitter(t *testing.T, splitter bufio.SplitFunc, tt testcase) {
 	var err error
 
 	start := 0
-	// Ітеруємо по вхідних байтах
 	for i := range tt.input {
-		// Викликаємо спліттер з поточним станом
 		advance, token, err = splitter(tt.input[start:i+1], i == len(tt.input)-1)
 		if token != nil {
 			tokens = append(tokens, string(token))
@@ -82,7 +80,6 @@ func runSplitter(t *testing.T, splitter bufio.SplitFunc, tt testcase) {
 		}
 	}
 
-	// Перевіряємо результати
 	if len(tokens) != len(tt.expectedTokens) {
 		t.Errorf("expected %d tokens, got %d", len(tt.expectedTokens), len(tokens))
 		for i, tc := range tokens {
